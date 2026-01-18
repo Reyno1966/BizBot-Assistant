@@ -15,7 +15,9 @@ class Settings(BaseSettings):
     
     # AI
     GEMINI_API_KEY: Optional[str] = "TU_KEY_PERSONAL_AQUI"
+    STRIPE_SECRET_KEY: Optional[str] = None
     VECTOR_DB_URL: Optional[str] = None
+    BASE_URL: str = "http://127.0.0.1:8000"
 
     class Config:
         case_sensitive = True

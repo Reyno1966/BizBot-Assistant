@@ -8,8 +8,14 @@ from app.db import init_db, get_session
 from sqlmodel import Session
 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+import os
+
+from app.api.v1.endpoints import auth, payments
 
 app = FastAPI(title=settings.PROJECT_NAME)
+app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
+app.include_router(payments.router, prefix="/api/v1/payments", tags=["payments"])
 
 # Configuración de CORS
 app.add_middleware(
@@ -19,6 +25,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Servir archivos estáticos (PDFs generados)
+os.makedirs("static", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.on_event("startup")
 def on_startup():
@@ -35,12 +45,13 @@ async def chat_endpoint(request: ChatRequest, session: Session = Depends(get_ses
     from sqlmodel import select
     
     tenant = session.get(Tenant, request.tenant_id)
-    if not tenant:
-        raise HTTPException(status_code=404, detail="Negocio no encontrado")
-        
+    
     tenant_context = {
-        "name": tenant.name,
-        "industry": tenant.industry
+        "name": tenant.name if tenant else "NexoBot Demo",
+        "industry": request.industry_override if request.industry_override else (tenant.industry if tenant else "general"),
+        "main_interest": tenant.main_interest if tenant else "General",
+        "language": request.language or "es",
+        "catalog": tenant.services if tenant else "[]"
     }
     
     # 2. Recuperar contexto del cliente (RAG)
@@ -54,17 +65,78 @@ async def chat_endpoint(request: ChatRequest, session: Session = Depends(get_ses
     full_query = f"{customer_info}\n\nMensaje del usuario: {request.message}"
     ai_output_raw = AIService.process_natural_language(full_query, tenant_context)
     
+    # Limpiar posibles bloques de markdown si Gemini los incluye
+    clean_output = ai_output_raw.strip()
+    if clean_output.startswith("```json"):
+        clean_output = clean_output.replace("```json", "", 1).replace("```", "", 1).strip()
+    elif clean_output.startswith("```"):
+        clean_output = clean_output.replace("```", "", 1).replace("```", "", 1).strip()
+
     try:
-        ai_output = json.loads(ai_output_raw)
+        ai_output = json.loads(clean_output)
     except Exception:
         # Fallback si Gemini no devuelve JSON puro
-        ai_output = {"intent": "chat", "response_text": ai_output_raw, "entities": {}}
+        ai_output = {"intent": "chat", "response_text": clean_output, "entities": {}}
     
+    # Lógica específica para Generación de Documentos y Notificaciones
+    from app.services.notification_service import NotificationService
+    
+    download_url = None
+    entities = ai_output.get('entities', {})
+    intent = ai_output.get('intent')
+    
+    # Notificaciones al Celular/WhatsApp del dueño
+    if tenant and tenant.phone:
+        if intent == "book_appointment":
+            NotificationService.notify_appointment(
+                tenant.name, tenant.phone, entities.get('cliente', 'Usuario'), entities
+            )
+        elif intent in ["generate_invoice", "generate_contract", "generate_summary"]:
+            NotificationService.notify_request(
+                tenant.name, tenant.phone, entities.get('cliente', 'Usuario'), intent.replace("generate_", "").capitalize()
+            )
+
+    if intent == "generate_contract":
+        filename = AIService.generate_contract_pdf(entities, tenant_context['name'])
+        download_url = f"{settings.BASE_URL}/static/{filename}"
+    if intent == "generate_invoice":
+        filename = AIService.generate_invoice_pdf(entities, tenant_context['name'])
+        download_url = f"{settings.BASE_URL}/static/{filename}"
+        # Lógica de Inventario: Descontar stock
+        if tenant:
+            try:
+                services = json.loads(tenant.services)
+                product_name = entities.get('servicios', '').lower()
+                for svc in services:
+                    if svc['name'].lower() in product_name or product_name in svc['name'].lower():
+                        current_stock = int(svc.get('stock', 0))
+                        if current_stock > 0:
+                            new_stock = current_stock - 1
+                            svc['stock'] = str(new_stock)
+                            
+                            # Alerta de Stock Bajo (<= 3 unidades)
+                            if new_stock <= 3:
+                                NotificationService.notify_low_stock(
+                                    tenant.name, tenant.phone, svc['name'], new_stock
+                                )
+                            break
+                tenant.services = json.dumps(services)
+                session.add(tenant)
+                session.commit()
+            except Exception as e:
+                print(f"Error actualizando inventario: {e}")
+    elif intent == "generate_summary":
+        filename = AIService.generate_summary_pdf(entities, tenant_context['name'])
+        download_url = f"{settings.BASE_URL}/static/{filename}"
+
+    if download_url:
+        ai_output['response_text'] = f"{ai_output.get('response_text')} ¡He generado el documento! Puedes descárgalo aquí: {download_url}"
+
     return ChatResponse(
         response=ai_output.get('response_text', "Lo siento, no pude procesar eso."),
-        intent=ai_output.get('intent', 'chat'),
-        action_required=ai_output.get('intent') in ["create_invoice", "book_appointment"],
-        metadata=ai_output.get('entities')
+        intent=intent or 'chat',
+        action_required=intent in ["create_invoice", "book_appointment", "generate_contract", "generate_invoice", "generate_summary"],
+        metadata={**entities, "download_url": download_url} if download_url else entities
     )
 
 if __name__ == "__main__":
