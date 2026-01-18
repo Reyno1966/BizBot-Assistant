@@ -83,7 +83,8 @@ export default function BizBotDashboard() {
         setIsLoading(true);
 
         try {
-            const response = await fetch('http://localhost:8000/api/v1/chat', {
+            const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+            const response = await fetch(`${apiUrl}/api/v1/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -360,8 +361,8 @@ export default function BizBotDashboard() {
                                             {msg.role === 'user' ? <Users size={16} /> : <Bot size={16} />}
                                         </div>
                                         <div className={`p-4 rounded-2xl max-w-[85%] border shadow-sm ${msg.role === 'user'
-                                                ? 'bg-indigo-600/20 border-indigo-500/30 rounded-tr-none text-white'
-                                                : 'bg-white/5 border-white/5 rounded-tl-none text-slate-100'
+                                            ? 'bg-indigo-600/20 border-indigo-500/30 rounded-tr-none text-white'
+                                            : 'bg-white/5 border-white/5 rounded-tl-none text-slate-100'
                                             }`}>
                                             <p className="text-sm leading-relaxed">{msg.text}</p>
                                         </div>
